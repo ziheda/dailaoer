@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>逮老二 · 三人联机测试</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+    body { margin: 0; background: #0b4b35; color: #fff; }
+    main { max-width: 900px; margin: 0 auto; padding: 20px; }
+    h1 { margin: 0 0 14px; font-size: 26px; }
+    section { background: rgba(0,0,0,.22); border-radius: 14px; padding: 14px; margin: 12px 0; }
+    input, button { border: 0; border-radius: 9px; padding: 10px 12px; margin: 4px; font-size: 15px; }
+    button { background: #f6c34a; color: #162017; cursor: pointer; font-weight: 700; }
+    button:disabled { opacity: .42; cursor: not-allowed; }
+    input { background: #fff; color: #111; }
+    .status { color: #ffe5a0; }
+    .players { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+    .player { background: rgba(255,255,255,.09); padding: 10px; border-radius: 10px; }
+    .cards { display: flex; flex-wrap: wrap; gap: 8px; min-height: 80px; }
+    .card { width: 58px; height: 78px; background: white; color: #111; border: 3px solid transparent; border-radius: 8px; font-size: 18px; }
+    .card.red { color: #cf2d35; }
+    .card.selected { border-color: #f6c34a; transform: translateY(-6px); }
+    .public { font-size: 28px; letter-spacing: 8px; }
+    pre { white-space: pre-wrap; max-height: 220px; overflow: auto; background: #082b20; padding: 10px; border-radius: 8px; }
+    @media (max-width: 600px) { .players { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>逮老二 · 三人联机服务器测试</h1>
+  <div id="connection" class="status">正在连接……</div>
+
+  <section id="lobby">
+    <input id="name" maxlength="12" placeholder="你的名字" value="玩家">
+    <button id="create">创建房间</button>
+    <input id="roomCode" inputmode="numeric" maxlength="6" placeholder="6位房间号">
+    <button id="join">加入房间</button>
+  </section>
+
+  <section>
+    <div>房间：<strong id="room">-</strong>　阶段：<strong id="phase">-</strong>　轮次：<strong id="round">-</strong></div>
+    <button id="ready" disabled>准备</button>
+    <div id="players" class="players"></div>
+  </section>
+
+  <section>
+    <div>公共牌</div>
+    <div id="publicCards" class="public">-</div>
+  </section>
+
+  <section>
+    <div>我的手牌：选择两张后锁定</div>
+    <div id="hand" class="cards"></div>
+    <button id="select" disabled>锁定两张牌</button>
+  </section>
+
+  <section>
+    <div>牌局记录</div>
+    <pre id="log"></pre>
+  </section>
+</main>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const selected = new Set();
+  let socket;
+  let state = null;
+  const rankText = {11:'J',12:'Q',13:'K',14:'A'};
+  const suitText = {club:'♣',diamond:'♦',heart:'♥',spade:'♠'};
+
+  function cardText(card) {
+    if (!card) return '🂠';
+    if (card.isJoker || card.suit === 'joker') return card.id === 'joker-big' ? '大王' : '小王';
+    return `${suitText[card.suit]}${rankText[card.rank] || card.rank}`;
+  }
+  function log(text) {
+    $('log').textContent = `${new Date().toLocaleTimeString()} ${text}\n${$('log').textContent}`;
+  }
+  function send(payload) {
+    if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(payload));
+  }
+  function connect() {
+    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    socket = new WebSocket(`${protocol}//${location.host}/ws`);
+    socket.onopen = () => {
+      $('connection').textContent = '服务器已连接';
+      const token = localStorage.getItem('gameSessionToken');
+      if (token) send({ type: 'resume', token });
+    };
+    socket.onclose = () => {
+      $('connection').textContent = '连接断开，2秒后重试';
+      setTimeout(connect, 2000);
+    };
+    socket.onerror = () => log('连接发生错误');
+    socket.onmessage = (event) => handle(JSON.parse(event.data));
+  }
+  function handle(message) {
+    if (message.type === 'session') {
+      localStorage.setItem('gameSessionToken', message.token);
+      $('room').textContent = message.roomCode;
+      log(`已进入房间 ${message.roomCode}`);
+    } else if (message.type === 'state') {
+      state = message;
+      render();
+    } else if (message.type === 'round_result') {
+      const lines = message.players.map((player) => {
+        const assignments = player.evaluation.jokerAssignments
+          .map((item) => `${item.jokerName}→${cardText(item.asCard)}`)
+          .join('、');
+        return `${player.name} ${player.cards.map(cardText).join(' ')} ${player.evaluation.name}${assignments ? `（${assignments}）` : ''} ${player.delta >= 0 ? '+' : ''}${player.delta}`;
+      });
+      log(`第${message.roundIndex + 1}轮（${message.baseScore}分）\n${lines.join('\n')}`);
+      selected.clear();
+    } else if (message.type === 'error') {
+      log(`错误：${message.message}`);
+      if (message.message.includes('恢复')) localStorage.removeItem('gameSessionToken');
+    }
+  }
+  function render() {
+    $('room').textContent = state.roomCode;
+    $('phase').textContent = state.phase;
+    $('round').textContent = state.roundIndex < 5 ? `${state.roundIndex + 1}（${state.baseScore}分）` : '-';
+    $('ready').disabled = state.phase !== 'WAITING';
+    $('players').innerHTML = state.players.map((player) => `
+      <div class="player">
+        <strong>${escapeHtml(player.name)}</strong>${player.id === state.yourPlayerId ? '（我）' : ''}<br>
+        ${player.connected ? '在线' : '断线'} · ${player.ready ? '已准备' : '未准备'}<br>
+        手牌 ${player.handCount} 张 · 总分 ${player.score}
+      </div>`).join('');
+    $('publicCards').textContent = state.publicCards.map(cardText).join(' ');
+    $('hand').innerHTML = '';
+    for (const card of state.yourHand) {
+      const button = document.createElement('button');
+      button.className = `card ${['heart','diamond'].includes(card.suit) ? 'red' : ''} ${selected.has(card.id) ? 'selected' : ''}`;
+      button.textContent = cardText(card);
+      button.onclick = () => {
+        if (state.phase !== 'SELECTING' || state.selectedPlayerIds.includes(state.yourPlayerId)) return;
+        if (selected.has(card.id)) selected.delete(card.id);
+        else if (selected.size < 2) selected.add(card.id);
+        render();
+      };
+      $('hand').appendChild(button);
+    }
+    $('select').disabled =
+      state.phase !== 'SELECTING' ||
+      state.roundIndex > 3 ||
+      selected.size !== 2 ||
+      state.selectedPlayerIds.includes(state.yourPlayerId);
+    if (state.phase === 'FINISHED') {
+      const winners = state.players.filter((player) => state.winnerIds.includes(player.id)).map((player) => player.name);
+      log(`大回合结束，最高分：${winners.join('、')}`);
+    }
+  }
+  function escapeHtml(value) {
+    return value.replace(/[&<>'"]/g, (char) => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
+  }
+  $('create').onclick = () => send({ type: 'create_room', name: $('name').value });
+  $('join').onclick = () => send({ type: 'join_room', name: $('name').value, roomCode: $('roomCode').value });
+  $('ready').onclick = () => send({ type: 'ready' });
+  $('select').onclick = () => send({ type: 'select_cards', cardIds: [...selected] });
+  connect();
+</script>
+</body>
+</html>
