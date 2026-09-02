@@ -41,6 +41,9 @@
   <section>
     <div>房间：<strong id="room">-</strong>　阶段：<strong id="phase">-</strong>　轮次：<strong id="round">-</strong></div>
     <button id="ready" disabled>准备</button>
+    <button id="confirm" disabled>确认并进入下一轮</button>
+    <button id="again" disabled>再来一回合</button>
+    <button id="exit" disabled>退出房间</button>
     <div id="players" class="players"></div>
   </section>
 
@@ -85,7 +88,7 @@
     socket.onopen = () => {
       $('connection').textContent = '服务器已连接';
       const token = localStorage.getItem('gameSessionToken');
-      if (token) send({ type: 'resume', token });
+      if (token) send({ type: 'resume', token, protocolVersion: 2 });
     };
     socket.onclose = () => {
       $('connection').textContent = '连接断开，2秒后重试';
@@ -111,6 +114,11 @@
       });
       log(`第${message.roundIndex + 1}轮（${message.baseScore}分）\n${lines.join('\n')}`);
       selected.clear();
+    } else if (message.type === 'room_exited') {
+      localStorage.removeItem('gameSessionToken');
+      state = null;
+      $('room').textContent = '-';
+      log('已退出房间');
     } else if (message.type === 'error') {
       log(`错误：${message.message}`);
       if (message.message.includes('恢复')) localStorage.removeItem('gameSessionToken');
@@ -118,13 +126,16 @@
   }
   function render() {
     $('room').textContent = state.roomCode;
-    $('phase').textContent = state.phase;
+    const seconds = state.selectionEndsAt
+      ? Math.max(0, Math.ceil((state.selectionEndsAt - Date.now()) / 1000))
+      : null;
+    $('phase').textContent = `${state.phase}${seconds === null ? '' : `（${seconds}秒）`}`;
     $('round').textContent = state.roundIndex < 5 ? `${state.roundIndex + 1}（${state.baseScore}分）` : '-';
     $('ready').disabled = state.phase !== 'WAITING';
     $('players').innerHTML = state.players.map((player) => `
       <div class="player">
         <strong>${escapeHtml(player.name)}</strong>${player.id === state.yourPlayerId ? '（我）' : ''}<br>
-        ${player.connected ? '在线' : '断线'} · ${player.ready ? '已准备' : '未准备'}<br>
+        ${player.connected ? '在线' : '断线'} · ${playerStatus(player)}<br>
         手牌 ${player.handCount} 张 · 总分 ${player.score}
       </div>`).join('');
     $('publicCards').textContent = state.publicCards.map(cardText).join(' ');
@@ -146,19 +157,40 @@
       state.roundIndex > 3 ||
       selected.size !== 2 ||
       state.selectedPlayerIds.includes(state.yourPlayerId);
+    $('confirm').disabled =
+      state.phase !== 'ROUND_CONFIRM' ||
+      state.confirmedPlayerIds.includes(state.yourPlayerId);
+    $('confirm').textContent = state.roundIndex <= 2 ? '确认并摸两张牌' : '确认进入最后一轮';
+    $('again').disabled =
+      state.phase !== 'FINISHED' ||
+      state.replayPlayerIds.includes(state.yourPlayerId);
+    $('exit').disabled = !['WAITING', 'FINISHED'].includes(state.phase);
     if (state.phase === 'FINISHED') {
       const winners = state.players.filter((player) => state.winnerIds.includes(player.id)).map((player) => player.name);
       log(`大回合结束，最高分：${winners.join('、')}`);
     }
   }
+  function playerStatus(player) {
+    if (state.phase === 'WAITING') return player.ready ? '已准备' : '未准备';
+    if (state.phase === 'SELECTING') return state.selectedPlayerIds.includes(player.id) ? '已选好' : '待选牌';
+    if (state.phase === 'ROUND_CONFIRM') return state.confirmedPlayerIds.includes(player.id) ? '已确认' : '待确认';
+    if (state.phase === 'FINISHED') return state.replayPlayerIds.includes(player.id) ? '再来一回合' : '等待选择';
+    return '正在亮牌';
+  }
   function escapeHtml(value) {
     return value.replace(/[&<>'"]/g, (char) => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
   }
-  $('create').onclick = () => send({ type: 'create_room', name: $('name').value });
-  $('join').onclick = () => send({ type: 'join_room', name: $('name').value, roomCode: $('roomCode').value });
+  $('create').onclick = () => send({ type: 'create_room', name: $('name').value, protocolVersion: 2 });
+  $('join').onclick = () => send({ type: 'join_room', name: $('name').value, roomCode: $('roomCode').value, protocolVersion: 2 });
   $('ready').onclick = () => send({ type: 'ready' });
   $('select').onclick = () => send({ type: 'select_cards', cardIds: [...selected] });
+  $('confirm').onclick = () => send({ type: 'confirm_round' });
+  $('again').onclick = () => send({ type: 'play_again' });
+  $('exit').onclick = () => {
+    if (window.confirm('确定退出当前房间吗？')) send({ type: 'exit_room' });
+  };
   connect();
+  setInterval(() => { if (state) render(); }, 500);
 </script>
 </body>
 </html>

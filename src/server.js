@@ -11,6 +11,7 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const INDEX_HTML = join(ROOT, 'public', 'index.html');
 const rooms = new Map();
 const sessions = new Map();
+const roomTimers = new Map();
 
 function json(ws, payload) {
   if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload));
@@ -48,6 +49,63 @@ function broadcast(room, payload) {
   }
 }
 
+function roomHasLegacyClient(room) {
+  return room.players.some((player) => {
+    const session = [...sessions.values()].find(
+      (item) => item.roomCode === room.code && item.playerId === player.id,
+    );
+    return (session?.protocolVersion || 1) < 2;
+  });
+}
+
+function clearRoomTimer(roomCode) {
+  const timer = roomTimers.get(roomCode);
+  if (timer) clearTimeout(timer);
+  roomTimers.delete(roomCode);
+}
+
+function scheduleRoomPhase(room) {
+  clearRoomTimer(room.code);
+  let deadline = null;
+  let action = null;
+
+  if (room.phase === 'SELECTING' && room.selectionEndsAt) {
+    deadline = room.selectionEndsAt;
+    action = () => {
+      if (room.phase !== 'SELECTING') return;
+      const result = room.autoSelectMissing();
+      if (result) broadcast(room, result);
+      broadcastState(room);
+      scheduleRoomPhase(room);
+    };
+  } else if (room.phase === 'REVEALING' && room.revealEndsAt) {
+    deadline = room.revealEndsAt;
+    action = () => {
+      if (room.phase !== 'REVEALING') return;
+      room.finishReveal();
+      let result = null;
+      // 兼容尚未更新“确认摸牌”按钮的旧版小游戏。
+      if (room.phase === 'ROUND_CONFIRM' && roomHasLegacyClient(room)) {
+        for (const player of room.players) result = room.confirmRound(player.id) || result;
+        if (result) broadcast(room, result);
+      }
+      broadcastState(room);
+      scheduleRoomPhase(room);
+    };
+  }
+
+  if (!deadline || !action) return;
+  const timer = setTimeout(() => {
+    roomTimers.delete(room.code);
+    try {
+      action();
+    } catch (error) {
+      broadcast(room, { type: 'error', message: error.message || '服务器计时任务错误' });
+    }
+  }, Math.max(0, deadline - Date.now()));
+  roomTimers.set(room.code, timer);
+}
+
 function attachSession(ws, token, session) {
   if (session.ws && session.ws !== ws && session.ws.readyState === WebSocket.OPEN) {
     session.ws.close(4001, '账号在其他连接恢复');
@@ -65,9 +123,9 @@ function attachSession(ws, token, session) {
   if (room) broadcastState(room);
 }
 
-function createSession(ws, room, player) {
+function createSession(ws, room, player, protocolVersion = 1) {
   const token = randomUUID();
-  const session = { roomCode: room.code, playerId: player.id, ws };
+  const session = { roomCode: room.code, playerId: player.id, ws, protocolVersion };
   sessions.set(token, session);
   attachSession(ws, token, session);
 }
@@ -87,7 +145,7 @@ async function handleMessage(ws, raw) {
       const room = new GameRoom(code);
       rooms.set(code, room);
       const player = room.addPlayer(message.name);
-      createSession(ws, room, player);
+      createSession(ws, room, player, Number(message.protocolVersion) || 1);
       break;
     }
     case 'join_room': {
@@ -96,7 +154,7 @@ async function handleMessage(ws, raw) {
       const room = rooms.get(code);
       if (!room) throw new Error('房间不存在');
       const player = room.addPlayer(message.name);
-      createSession(ws, room, player);
+      createSession(ws, room, player, Number(message.protocolVersion) || 1);
       broadcastState(room);
       break;
     }
@@ -104,13 +162,15 @@ async function handleMessage(ws, raw) {
       const token = String(message.token || '');
       const session = sessions.get(token);
       if (!session) throw new Error('无法恢复原牌局');
+      session.protocolVersion = Number(message.protocolVersion) || session.protocolVersion || 1;
       attachSession(ws, token, session);
       break;
     }
     case 'ready': {
       const { session, room } = getSession(ws);
-      room.setReady(session.playerId);
+      const started = room.setReady(session.playerId);
       broadcastState(room);
+      if (started) scheduleRoomPhase(room);
       break;
     }
     case 'select_cards': {
@@ -119,17 +179,37 @@ async function handleMessage(ws, raw) {
       if (result) {
         broadcast(room, result);
         broadcastState(room);
-        if (room.phase === 'FINAL_PENDING') {
-          setTimeout(() => {
-            if (room.phase !== 'FINAL_PENDING') return;
-            const finalResult = room.settleFinalRound();
-            broadcast(room, finalResult);
-            broadcastState(room);
-          }, 2500);
-        }
+        scheduleRoomPhase(room);
       } else {
         broadcastState(room);
       }
+      break;
+    }
+    case 'confirm_round': {
+      const { session, room } = getSession(ws);
+      const result = room.confirmRound(session.playerId);
+      if (result) broadcast(room, result);
+      broadcastState(room);
+      scheduleRoomPhase(room);
+      break;
+    }
+    case 'play_again': {
+      const { session, room } = getSession(ws);
+      const started = room.requestReplay(session.playerId);
+      broadcastState(room);
+      if (started) scheduleRoomPhase(room);
+      break;
+    }
+    case 'exit_room': {
+      const { session, room } = getSession(ws);
+      const token = ws.sessionToken;
+      room.removePlayer(session.playerId);
+      sessions.delete(token);
+      ws.sessionToken = null;
+      clearRoomTimer(room.code);
+      json(ws, { type: 'room_exited' });
+      if (room.players.length === 0) rooms.delete(room.code);
+      else broadcastState(room);
       break;
     }
     case 'heartbeat':

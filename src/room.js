@@ -1,6 +1,15 @@
 import { randomUUID } from 'node:crypto';
 import { createDeck, ROUND_SCORES, settleThreeHands, shuffle } from './game.js';
 
+const parsedSelectDuration = Number(process.env.SELECT_DURATION_MS || 30000);
+const parsedRevealDuration = Number(process.env.REVEAL_DURATION_MS || 3000);
+export const SELECT_DURATION_MS = Number.isFinite(parsedSelectDuration)
+  ? Math.max(100, parsedSelectDuration)
+  : 30000;
+export const REVEAL_DURATION_MS = Number.isFinite(parsedRevealDuration)
+  ? Math.max(100, parsedRevealDuration)
+  : 3000;
+
 export class GameRoom {
   constructor(code) {
     this.code = code;
@@ -9,7 +18,13 @@ export class GameRoom {
     this.roundIndex = 0;
     this.deck = [];
     this.publicCards = [];
+    this.hiddenPublicCardId = null;
     this.selections = new Map();
+    this.autoSelectedPlayerIds = new Set();
+    this.confirmedPlayerIds = new Set();
+    this.replayPlayerIds = new Set();
+    this.selectionEndsAt = null;
+    this.revealEndsAt = null;
     this.lastResult = null;
   }
 
@@ -55,9 +70,11 @@ export class GameRoom {
     this.deck = shuffle(createDeck());
     this.publicCards = [];
     this.selections.clear();
+    this.autoSelectedPlayerIds.clear();
+    this.confirmedPlayerIds.clear();
+    this.replayPlayerIds.clear();
     this.lastResult = null;
     this.roundIndex = 0;
-    this.phase = 'SELECTING';
 
     for (const player of this.players) {
       player.hand = [];
@@ -67,11 +84,20 @@ export class GameRoom {
 
     // Deal one card at a time so the process matches a physical table.
     for (let cardNumber = 0; cardNumber < 5; cardNumber += 1) {
-      for (const player of this.players) {
-        player.hand.push(this.draw());
-      }
+      for (const player of this.players) player.hand.push(this.draw());
     }
-    for (let i = 0; i < 4; i += 1) this.publicCards.push(this.draw());
+    for (let index = 0; index < 4; index += 1) this.publicCards.push(this.draw());
+    this.hiddenPublicCardId = this.publicCards[3].id;
+    this.beginSelection();
+  }
+
+  beginSelection() {
+    this.phase = 'SELECTING';
+    this.selections.clear();
+    this.autoSelectedPlayerIds.clear();
+    this.confirmedPlayerIds.clear();
+    this.selectionEndsAt = Date.now() + SELECT_DURATION_MS;
+    this.revealEndsAt = null;
   }
 
   draw() {
@@ -94,13 +120,25 @@ export class GameRoom {
     if (selected.some((card) => !card)) throw new Error('选中的牌不在你的手牌中');
 
     this.selections.set(playerId, selected);
-    if (this.selections.size === 3) return this.resolveSelectedRound();
+    if (this.selections.size === this.players.length) return this.resolveSelectedRound();
     return null;
+  }
+
+  autoSelectMissing() {
+    if (this.phase !== 'SELECTING') return null;
+    for (const player of this.players) {
+      if (this.selections.has(player.id)) continue;
+      if (player.hand.length < 2) throw new Error('自动选牌时手牌不足');
+      this.selections.set(player.id, shuffle(player.hand).slice(0, 2));
+      this.autoSelectedPlayerIds.add(player.id);
+    }
+    return this.resolveSelectedRound();
   }
 
   resolveSelectedRound() {
     const round = this.roundIndex;
-    const publicCard = this.publicCards[round];
+    const publicCard = this.publicCards.shift();
+    if (!publicCard) throw new Error('本轮公共牌不存在');
     const hands = this.players.map((player) => [
       ...this.selections.get(player.id),
       publicCard,
@@ -111,29 +149,50 @@ export class GameRoom {
       const selectedIds = new Set(this.selections.get(player.id).map((card) => card.id));
       player.hand = player.hand.filter((card) => !selectedIds.has(card.id));
       player.score += settlement.deltas[index];
-      if (round <= 2) {
-        player.hand.push(this.draw(), this.draw());
-      }
     });
 
-    const result = this.makeResult(round, hands, settlement);
+    const result = this.makeResult(round, hands, settlement, publicCard);
     this.lastResult = result;
+    this.phase = 'REVEALING';
+    this.selectionEndsAt = null;
+    this.revealEndsAt = Date.now() + REVEAL_DURATION_MS;
+    this.confirmedPlayerIds.clear();
     this.selections.clear();
-
-    if (round === 3) {
-      this.roundIndex = 4;
-      this.phase = 'FINAL_PENDING';
-    } else {
-      this.roundIndex += 1;
-      this.phase = 'SELECTING';
-    }
     return result;
   }
 
-  settleFinalRound() {
-    if (this.phase !== 'FINAL_PENDING' || this.roundIndex !== 4) {
-      throw new Error('当前不能结算最后一轮');
+  finishReveal() {
+    if (this.phase !== 'REVEALING') return false;
+    this.revealEndsAt = null;
+    if (this.roundIndex === 4) {
+      this.phase = 'FINISHED';
+      return true;
     }
+    this.phase = 'ROUND_CONFIRM';
+    this.confirmedPlayerIds.clear();
+    return true;
+  }
+
+  confirmRound(playerId) {
+    if (this.phase !== 'ROUND_CONFIRM') throw new Error('当前不需要确认');
+    if (!this.getPlayer(playerId)) throw new Error('玩家不存在');
+    this.confirmedPlayerIds.add(playerId);
+    if (this.confirmedPlayerIds.size !== this.players.length) return null;
+
+    this.confirmedPlayerIds.clear();
+    if (this.roundIndex <= 2) {
+      for (const player of this.players) player.hand.push(this.draw(), this.draw());
+      this.roundIndex += 1;
+      this.beginSelection();
+      return null;
+    }
+
+    this.roundIndex = 4;
+    return this.settleFinalRound();
+  }
+
+  settleFinalRound() {
+    if (this.roundIndex !== 4) throw new Error('当前不能结算最后一轮');
     const hands = this.players.map((player) => {
       if (player.hand.length !== 3) throw new Error('最后一轮手牌数量不是3张');
       return [...player.hand];
@@ -142,18 +201,62 @@ export class GameRoom {
     this.players.forEach((player, index) => {
       player.score += settlement.deltas[index];
     });
-    const result = this.makeResult(4, hands, settlement);
+    const result = this.makeResult(4, hands, settlement, null);
     this.lastResult = result;
-    this.phase = 'FINISHED';
+    this.phase = 'REVEALING';
+    this.selectionEndsAt = null;
+    this.revealEndsAt = Date.now() + REVEAL_DURATION_MS;
     return result;
   }
 
-  makeResult(roundIndex, hands, settlement) {
+  requestReplay(playerId) {
+    if (this.phase !== 'FINISHED') throw new Error('当前不能再来一回合');
+    if (!this.getPlayer(playerId)) throw new Error('玩家不存在');
+    this.replayPlayerIds.add(playerId);
+    if (this.replayPlayerIds.size === this.players.length) {
+      this.start();
+      return true;
+    }
+    return false;
+  }
+
+  removePlayer(playerId) {
+    if (this.phase !== 'WAITING' && this.phase !== 'FINISHED') {
+      throw new Error('牌局进行中，暂时不能退出房间');
+    }
+    const originalLength = this.players.length;
+    this.players = this.players.filter((player) => player.id !== playerId);
+    if (this.players.length === originalLength) throw new Error('玩家不存在');
+    this.resetToWaiting();
+  }
+
+  resetToWaiting() {
+    this.phase = 'WAITING';
+    this.roundIndex = 0;
+    this.deck = [];
+    this.publicCards = [];
+    this.hiddenPublicCardId = null;
+    this.selections.clear();
+    this.autoSelectedPlayerIds.clear();
+    this.confirmedPlayerIds.clear();
+    this.replayPlayerIds.clear();
+    this.selectionEndsAt = null;
+    this.revealEndsAt = null;
+    this.lastResult = null;
+    for (const player of this.players) {
+      player.ready = false;
+      player.hand = [];
+      player.score = 0;
+    }
+  }
+
+  makeResult(roundIndex, hands, settlement, publicCard) {
     return {
       type: 'round_result',
       roundIndex,
       baseScore: ROUND_SCORES[roundIndex],
-      publicCard: roundIndex < 4 ? this.publicCards[roundIndex] : null,
+      publicCard,
+      autoSelectedPlayerIds: [...this.autoSelectedPlayerIds],
       players: this.players.map((player, index) => ({
         id: player.id,
         name: player.name,
@@ -169,15 +272,9 @@ export class GameRoom {
   snapshotFor(playerId) {
     const viewer = this.getPlayer(playerId);
     if (!viewer) throw new Error('玩家不存在');
-    const fourthPublicVisible = this.roundIndex >= 4 || this.phase === 'FINISHED';
-    const visiblePublicCards = this.publicCards.map((card, index) =>
-      index === 3 && !fourthPublicVisible ? null : card,
+    const visiblePublicCards = this.publicCards.map((card) =>
+      card.id === this.hiddenPublicCardId && this.roundIndex < 3 ? null : card,
     );
-    const currentPublicCard =
-      this.phase === 'SELECTING' && this.roundIndex <= 2
-        ? this.publicCards[this.roundIndex]
-        : null;
-
     const topScore = Math.max(...this.players.map((player) => player.score));
     return {
       type: 'state',
@@ -186,10 +283,27 @@ export class GameRoom {
       roundIndex: this.roundIndex,
       baseScore: ROUND_SCORES[this.roundIndex] ?? null,
       publicCards: visiblePublicCards,
-      currentPublicCard,
+      currentPublicCard:
+        this.phase === 'SELECTING' && this.roundIndex <= 3
+          ? visiblePublicCards[0] ?? null
+          : null,
+      selectionEndsAt: this.selectionEndsAt,
+      revealEndsAt: this.revealEndsAt,
       yourPlayerId: playerId,
       yourHand: viewer.hand,
       selectedPlayerIds: [...this.selections.keys()],
+      confirmedPlayerIds: [...this.confirmedPlayerIds],
+      replayPlayerIds: [...this.replayPlayerIds],
+      revealedHands:
+        this.phase === 'REVEALING' && this.lastResult
+          ? this.lastResult.players.map((player) => ({
+              id: player.id,
+              name: player.name,
+              cards: player.cards,
+              evaluationName: player.evaluation.name,
+              delta: player.delta,
+            }))
+          : [],
       players: this.players.map((player) => ({
         id: player.id,
         name: player.name,

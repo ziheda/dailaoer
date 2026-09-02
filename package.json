@@ -6,7 +6,7 @@
   "description": "Three-player authoritative card-game server prototype",
   "scripts": {
     "start": "node src/server.js",
-    "test": "node test/game.test.js",
+    "test": "node test/room.test.js",
     "test:integration": "node test/integration.test.js"
   },
   "engines": {

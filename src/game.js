@@ -223,28 +223,47 @@ export function settleThreeHands(hands, baseScore) {
   const evaluations = hands.map(evaluateHand);
   const deltas = [0, 0, 0];
   const pairResults = [];
-  const pairs = [
-    [0, 1],
-    [0, 2],
-    [1, 2],
-  ];
 
-  for (const [left, right] of pairs) {
-    const comparison = compareEvaluations(evaluations[left], evaluations[right]);
-    if (comparison === 0) {
-      pairResults.push({ left, right, winner: null, score: 0 });
-      continue;
-    }
-
+  const transfer = (payer, receiver) => {
     const bothBaoZi =
-      evaluations[left].category === HAND_CATEGORY.BAO_ZI &&
-      evaluations[right].category === HAND_CATEGORY.BAO_ZI;
+      evaluations[payer].category === HAND_CATEGORY.BAO_ZI &&
+      evaluations[receiver].category === HAND_CATEGORY.BAO_ZI;
     const score = baseScore * (bothBaoZi ? 2 : 1);
-    const winner = comparison > 0 ? left : right;
-    const loser = comparison > 0 ? right : left;
-    deltas[winner] += score;
-    deltas[loser] -= score;
-    pairResults.push({ left, right, winner, score, bothBaoZi });
+    deltas[payer] -= score;
+    deltas[receiver] += score;
+    pairResults.push({
+      left: Math.min(payer, receiver),
+      right: Math.max(payer, receiver),
+      payer,
+      receiver,
+      winner: receiver,
+      loser: payer,
+      score,
+      bothBaoZi,
+    });
+  };
+
+  const ranked = [0, 1, 2].sort(
+    (left, right) => -compareEvaluations(evaluations[left], evaluations[right]),
+  );
+  const [highest, middle, lowest] = ranked;
+  const highMiddleComparison = compareEvaluations(evaluations[highest], evaluations[middle]);
+  const middleLowComparison = compareEvaluations(evaluations[middle], evaluations[lowest]);
+
+  if (highMiddleComparison === 0 && middleLowComparison === 0) {
+    // 三家完全相同，本轮不计分。
+  } else if (highMiddleComparison === 0) {
+    // 两家同为最大牌时，第三家向这两家分别付分。
+    transfer(lowest, highest);
+    transfer(lowest, middle);
+  } else if (middleLowComparison === 0) {
+    // 两家同为较小牌时，两家分别向第三家付分。
+    transfer(middle, highest);
+    transfer(lowest, highest);
+  } else {
+    // “逮老二”：中间牌型的玩家向最大牌和最小牌分别付分。
+    transfer(middle, highest);
+    transfer(middle, lowest);
   }
 
   if (deltas.reduce((sum, value) => sum + value, 0) !== 0) {
