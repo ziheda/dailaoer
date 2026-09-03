@@ -127,7 +127,18 @@ try {
   const replayStates = await waitForState(clients, 'SELECTING', 0);
   assert.equal(replayStates[0].publicCards.length, 4);
   assert.ok(replayStates[0].selectionEndsAt > Date.now());
-  console.log(`联机测试通过：房间 ${creatorSession.roomCode} 已完成计时、亮牌、确认和再来一局流程`);
+
+  clients.forEach((client) => { client.messages = []; });
+  clients[0].send({ type: 'exit_room' });
+  await clients[0].waitFor((message) => message.type === 'room_exited');
+  const departureNotices = await Promise.all(clients.slice(1).map((client) => client.waitFor(
+    (message) => message.type === 'player_left' && message.playerName === '甲',
+  )));
+  assert.equal(departureNotices.every((message) => message.interrupted), true);
+  const waitingStates = await waitForState(clients.slice(1), 'WAITING', 0);
+  assert.equal(waitingStates.every((state) => state.players.length === 2), true);
+  assert.equal(waitingStates.every((state) => state.players.every((player) => player.score === 0)), true);
+  console.log(`联机测试通过：房间 ${creatorSession.roomCode} 已完成计时、亮牌、确认、再来一局和中途退出流程`);
 } finally {
   clients.forEach((client) => client.close());
 }

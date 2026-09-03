@@ -132,11 +132,18 @@ test('三名玩家都选择再来一回合后才重新发牌', () => {
   });
 });
 
-test('结束后退出房间会让剩余玩家回到等待状态', () => {
+test('牌局进行中有人退出时中止本局并让其余玩家留在房间等待', () => {
   const { room, players } = createStartedRoom();
-  room.phase = 'FINISHED';
-  room.removePlayer(players[0].id);
+  const result = room.removePlayer(players[0].id);
+  assert.equal(result.playerName, '甲');
+  assert.equal(result.interrupted, true);
+  assert.equal(result.previousPhase, 'SELECTING');
   assert.equal(room.players.length, 2);
   assert.equal(room.phase, 'WAITING');
   assert.equal(room.publicCards.length, 0);
+  room.players.forEach((player) => {
+    assert.equal(player.ready, false);
+    assert.equal(player.hand.length, 0);
+    assert.equal(player.score, 0);
+  });
 });

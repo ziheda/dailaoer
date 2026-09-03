@@ -221,13 +221,17 @@ export class GameRoom {
   }
 
   removePlayer(playerId) {
-    if (this.phase !== 'WAITING' && this.phase !== 'FINISHED') {
-      throw new Error('牌局进行中，暂时不能退出房间');
-    }
-    const originalLength = this.players.length;
+    const player = this.getPlayer(playerId);
+    if (!player) throw new Error('玩家不存在');
+    const previousPhase = this.phase;
     this.players = this.players.filter((player) => player.id !== playerId);
-    if (this.players.length === originalLength) throw new Error('玩家不存在');
     this.resetToWaiting();
+    return {
+      playerId,
+      playerName: player.name,
+      interrupted: !['WAITING', 'FINISHED'].includes(previousPhase),
+      previousPhase,
+    };
   }
 
   resetToWaiting() {

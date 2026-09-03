@@ -203,13 +203,21 @@ async function handleMessage(ws, raw) {
     case 'exit_room': {
       const { session, room } = getSession(ws);
       const token = ws.sessionToken;
-      room.removePlayer(session.playerId);
+      const exitResult = room.removePlayer(session.playerId);
       sessions.delete(token);
       ws.sessionToken = null;
       clearRoomTimer(room.code);
       json(ws, { type: 'room_exited' });
       if (room.players.length === 0) rooms.delete(room.code);
-      else broadcastState(room);
+      else {
+        broadcast(room, {
+          type: 'player_left',
+          playerId: exitResult.playerId,
+          playerName: exitResult.playerName,
+          interrupted: exitResult.interrupted,
+        });
+        broadcastState(room);
+      }
       break;
     }
     case 'heartbeat':
