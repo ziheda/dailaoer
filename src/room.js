@@ -26,6 +26,7 @@ export class GameRoom {
     this.selectionEndsAt = null;
     this.revealEndsAt = null;
     this.lastResult = null;
+    this.roundHistory = [];
   }
 
   addPlayer(name) {
@@ -74,6 +75,7 @@ export class GameRoom {
     this.confirmedPlayerIds.clear();
     this.replayPlayerIds.clear();
     this.lastResult = null;
+    this.roundHistory = [];
     this.roundIndex = 0;
 
     for (const player of this.players) {
@@ -153,6 +155,7 @@ export class GameRoom {
 
     const result = this.makeResult(round, hands, settlement, publicCard);
     this.lastResult = result;
+    this.roundHistory.push(result);
     this.phase = 'REVEALING';
     this.selectionEndsAt = null;
     this.revealEndsAt = Date.now() + REVEAL_DURATION_MS;
@@ -203,6 +206,7 @@ export class GameRoom {
     });
     const result = this.makeResult(4, hands, settlement, null);
     this.lastResult = result;
+    this.roundHistory.push(result);
     this.phase = 'REVEALING';
     this.selectionEndsAt = null;
     this.revealEndsAt = Date.now() + REVEAL_DURATION_MS;
@@ -247,6 +251,7 @@ export class GameRoom {
     this.selectionEndsAt = null;
     this.revealEndsAt = null;
     this.lastResult = null;
+    this.roundHistory = [];
     for (const player of this.players) {
       player.ready = false;
       player.hand = [];
@@ -304,7 +309,7 @@ export class GameRoom {
     const viewer = this.getPlayer(playerId);
     if (!viewer) throw new Error('玩家不存在');
     const visiblePublicCards = this.publicCards.map((card) =>
-      card.id === this.hiddenPublicCardId && this.roundIndex < 3 ? null : card,
+      card.id === this.hiddenPublicCardId && this.roundIndex <= 3 ? null : card,
     );
     const topScore = Math.max(...this.players.map((player) => player.score));
     return {
@@ -339,6 +344,20 @@ export class GameRoom {
         ['REVEALING', 'ROUND_CONFIRM'].includes(this.phase) && this.lastResult
           ? this.lastResult.settlementText
           : '',
+      roundHistory: this.roundHistory.map((result) => ({
+        roundIndex: result.roundIndex,
+        baseScore: result.baseScore,
+        publicCard: result.publicCard,
+        settlementText: result.settlementText,
+        players: result.players.map((player) => ({
+          id: player.id,
+          name: player.name,
+          cards: player.cards,
+          evaluationName: player.evaluation.name,
+          delta: player.delta,
+          totalScore: player.totalScore,
+        })),
+      })),
       players: this.players.map((player) => ({
         id: player.id,
         name: player.name,

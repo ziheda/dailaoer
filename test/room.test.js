@@ -69,6 +69,7 @@ test('每轮消耗公共牌、亮牌、确认后补牌并完成五轮', () => {
   assert.equal(firstResult.roundIndex, 0);
   assert.equal(room.phase, 'REVEALING');
   assert.equal(room.publicCards.length, 3);
+  assert.equal(room.roundHistory.length, 1);
   assert.equal(room.snapshotFor(players[0].id).revealedHands.length, 3);
   room.players.forEach((player) => assert.equal(player.hand.length, 3));
 
@@ -94,12 +95,24 @@ test('每轮消耗公共牌、亮牌、确认后补牌并完成五轮', () => {
   room.finishReveal();
   confirmEveryone(room);
 
-  selectFirstTwoForEveryone(room);
+  const fourthRoundBeforeSelection = room.snapshotFor(players[0].id);
+  assert.equal(fourthRoundBeforeSelection.roundIndex, 3);
+  assert.deepEqual(fourthRoundBeforeSelection.publicCards, [null]);
+  const fourthResult = selectFirstTwoForEveryone(room);
+  assert.ok(fourthResult.publicCard);
+  assert.equal(
+    fourthResult.players.every((player) =>
+      player.cards.some((item) => item.id === fourthResult.publicCard.id),
+    ),
+    true,
+  );
   assert.equal(room.publicCards.length, 0);
   room.finishReveal();
   const finalResult = confirmEveryone(room);
   assert.equal(finalResult.roundIndex, 4);
   assert.equal(room.phase, 'REVEALING');
+  assert.equal(room.roundHistory.length, 5);
+  assert.equal(room.snapshotFor(players[0].id).roundHistory.length, 5);
   room.players.forEach((player) => assert.equal(player.hand.length, 3));
 
   room.finishReveal();

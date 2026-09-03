@@ -72,6 +72,9 @@ try {
   for (let roundIndex = 0; roundIndex < 4; roundIndex += 1) {
     const states = await waitForState(clients, 'SELECTING', roundIndex);
     assert.equal(states[0].publicCards.length, 4 - roundIndex);
+    if (roundIndex === 3) {
+      assert.equal(states.every((state) => state.publicCards[0] === null), true);
+    }
     if (roundIndex === 0) {
       clients[0].send({
         type: 'select_cards',
@@ -106,9 +109,11 @@ try {
     if (roundIndex === 1) assert.equal(results[0].autoSelectedPlayerIds.length, 2);
     assert.equal(typeof results[0].settlementText, 'string');
     assert.ok(results[0].settlementText.length > 0);
+    if (roundIndex === 3) assert.ok(results[0].publicCard);
 
     const confirmingStates = await waitForState(clients, 'ROUND_CONFIRM', roundIndex);
     assert.equal(confirmingStates[0].publicCards.length, 3 - roundIndex);
+    assert.equal(confirmingStates.every((state) => state.roundHistory.length === roundIndex + 1), true);
     assert.equal(confirmingStates.every((state) => state.revealedHands.length === 3), true);
     assert.equal(confirmingStates.every((state) => state.revealedHands.every(
       (player) => player.cards.length === 3 && player.evaluationName,
@@ -121,6 +126,7 @@ try {
   )));
   const finishedStates = await waitForState(clients, 'FINISHED', 4);
   assert.equal(finishedStates[0].players.reduce((sum, player) => sum + player.score, 0), 0);
+  assert.equal(finishedStates.every((state) => state.roundHistory.length === 5), true);
 
   clients.forEach((client) => { client.messages = []; });
   clients.forEach((client) => client.send({ type: 'play_again' }));
