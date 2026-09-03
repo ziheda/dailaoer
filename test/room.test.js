@@ -62,6 +62,7 @@ test('每轮消耗公共牌、亮牌、确认后补牌并完成五轮', () => {
   const { room, players } = createStartedRoom();
   assert.equal(room.phase, 'SELECTING');
   assert.equal(room.publicCards.length, 4);
+  assert.equal(room.snapshotFor(players[0].id).deckCount, 35);
   assert.ok(room.selectionEndsAt > Date.now());
   room.players.forEach((player) => assert.equal(player.hand.length, 5));
 
@@ -81,6 +82,7 @@ test('每轮消耗公共牌、亮牌、确认后补牌并完成五轮', () => {
   room.confirmRound(players[2].id);
   assert.equal(room.phase, 'SELECTING');
   assert.equal(room.roundIndex, 1);
+  assert.equal(room.snapshotFor(players[0].id).deckCount, 29);
   room.players.forEach((player) => assert.equal(player.hand.length, 5));
 
   room.selectCards(players[0].id, players[0].hand.slice(0, 2).map((card) => card.id));

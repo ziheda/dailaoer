@@ -319,6 +319,7 @@ export class GameRoom {
       roundIndex: this.roundIndex,
       baseScore: ROUND_SCORES[this.roundIndex] ?? null,
       publicCards: visiblePublicCards,
+      deckCount: this.deck.length,
       currentPublicCard:
         this.phase === 'SELECTING' && this.roundIndex <= 3
           ? visiblePublicCards[0] ?? null
