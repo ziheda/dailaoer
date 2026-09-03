@@ -251,12 +251,39 @@ export class GameRoom {
   }
 
   makeResult(roundIndex, hands, settlement, publicCard) {
+    const payments = settlement.pairResults.map((payment) => ({
+      payerId: this.players[payment.payer].id,
+      payerName: this.players[payment.payer].name,
+      receiverId: this.players[payment.receiver].id,
+      receiverName: this.players[payment.receiver].name,
+      score: payment.score,
+    }));
+    let settlementText = '三家牌型相同，本轮不计分';
+    if (
+      payments.length === 2 &&
+      payments[0].payerId === payments[1].payerId &&
+      payments[0].score === payments[1].score
+    ) {
+      settlementText = `${payments[0].payerName}向${payments[0].receiverName}、${payments[1].receiverName}各付${payments[0].score}分`;
+    } else if (
+      payments.length === 2 &&
+      payments[0].receiverId === payments[1].receiverId &&
+      payments[0].score === payments[1].score
+    ) {
+      settlementText = `${payments[0].payerName}、${payments[1].payerName}分别向${payments[0].receiverName}付${payments[0].score}分`;
+    } else if (payments.length) {
+      settlementText = payments
+        .map((payment) => `${payment.payerName}向${payment.receiverName}付${payment.score}分`)
+        .join('；');
+    }
     return {
       type: 'round_result',
       roundIndex,
       baseScore: ROUND_SCORES[roundIndex],
       publicCard,
       autoSelectedPlayerIds: [...this.autoSelectedPlayerIds],
+      payments,
+      settlementText,
       players: this.players.map((player, index) => ({
         id: player.id,
         name: player.name,
@@ -295,7 +322,7 @@ export class GameRoom {
       confirmedPlayerIds: [...this.confirmedPlayerIds],
       replayPlayerIds: [...this.replayPlayerIds],
       revealedHands:
-        this.phase === 'REVEALING' && this.lastResult
+        ['REVEALING', 'ROUND_CONFIRM'].includes(this.phase) && this.lastResult
           ? this.lastResult.players.map((player) => ({
               id: player.id,
               name: player.name,
@@ -304,6 +331,10 @@ export class GameRoom {
               delta: player.delta,
             }))
           : [],
+      settlementText:
+        ['REVEALING', 'ROUND_CONFIRM'].includes(this.phase) && this.lastResult
+          ? this.lastResult.settlementText
+          : '',
       players: this.players.map((player) => ({
         id: player.id,
         name: player.name,

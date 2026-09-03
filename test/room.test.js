@@ -34,6 +34,14 @@ test('三家牌型不同时由中间玩家分别付给最大和最小玩家', ()
   assert.deepEqual(result.deltas, [3, -6, 3]);
 });
 
+test('豹子、对子、散牌时对子玩家向另外两家分别付分', () => {
+  const baoZi = [card(14), card(14, 'heart'), card(14, 'spade')];
+  const pair = [card(13), card(13, 'heart'), card(8, 'spade')];
+  const highCard = [card(12), card(10, 'heart'), card(7, 'spade')];
+  assert.deepEqual(settleThreeHands([baoZi, pair, highCard], 1).deltas, [1, -2, 1]);
+  assert.deepEqual(settleThreeHands([baoZi, pair, highCard], 2).deltas, [2, -4, 2]);
+});
+
 test('两家同为最大牌时由较小的第三家分别付分', () => {
   const sameA = [card(14), card(10, 'heart'), card(8, 'spade')];
   const sameB = [card(14, 'diamond'), card(10, 'spade'), card(8, 'heart')];

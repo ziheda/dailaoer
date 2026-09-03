@@ -72,7 +72,23 @@ try {
   for (let roundIndex = 0; roundIndex < 4; roundIndex += 1) {
     const states = await waitForState(clients, 'SELECTING', roundIndex);
     assert.equal(states[0].publicCards.length, 4 - roundIndex);
-    if (roundIndex === 1) {
+    if (roundIndex === 0) {
+      clients[0].send({
+        type: 'select_cards',
+        cardIds: states[0].yourHand.slice(0, 2).map((card) => card.id),
+      });
+      const selectedStates = await Promise.all(clients.map((client) => client.waitFor(
+        (message) => message.type === 'state' &&
+          message.phase === 'SELECTING' &&
+          message.roundIndex === roundIndex &&
+          message.selectedPlayerIds.includes(states[0].yourPlayerId),
+      )));
+      assert.equal(selectedStates.every((state) => state.selectedPlayerIds.length === 1), true);
+      states.slice(1).forEach((state, index) => clients[index + 1].send({
+        type: 'select_cards',
+        cardIds: state.yourHand.slice(0, 2).map((card) => card.id),
+      }));
+    } else if (roundIndex === 1) {
       clients[0].send({
         type: 'select_cards',
         cardIds: states[0].yourHand.slice(0, 2).map((card) => card.id),
@@ -88,9 +104,15 @@ try {
       (message) => message.type === 'round_result' && message.roundIndex === roundIndex,
     )));
     if (roundIndex === 1) assert.equal(results[0].autoSelectedPlayerIds.length, 2);
+    assert.equal(typeof results[0].settlementText, 'string');
+    assert.ok(results[0].settlementText.length > 0);
 
     const confirmingStates = await waitForState(clients, 'ROUND_CONFIRM', roundIndex);
     assert.equal(confirmingStates[0].publicCards.length, 3 - roundIndex);
+    assert.equal(confirmingStates.every((state) => state.revealedHands.length === 3), true);
+    assert.equal(confirmingStates.every((state) => state.revealedHands.every(
+      (player) => player.cards.length === 3 && player.evaluationName,
+    )), true);
     clients.forEach((client) => client.send({ type: 'confirm_round' }));
   }
 
