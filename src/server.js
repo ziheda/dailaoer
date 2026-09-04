@@ -12,9 +12,12 @@ const INDEX_HTML = join(ROOT, 'public', 'index.html');
 const rooms = new Map();
 const sessions = new Map();
 const roomTimers = new Map();
+const matchmakingQueue = [];
+const settledMatchIds = new Set();
+const MATCH_STAKE = 100;
 
 function json(ws, payload) {
-  if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload));
+  if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload));
 }
 
 function createRoomCode() {
@@ -47,6 +50,128 @@ function broadcast(room, payload) {
   for (const session of sessions.values()) {
     if (session.roomCode === room.code && session.ws) json(session.ws, payload);
   }
+}
+
+function roomSessions(room) {
+  return [...sessions.entries()].filter(([, session]) => session.roomCode === room.code);
+}
+
+function removeFromMatchmakingQueue(ws) {
+  const index = matchmakingQueue.findIndex((entry) => entry.ws === ws);
+  if (index < 0) return false;
+  matchmakingQueue.splice(index, 1);
+  notifyMatchmakingQueue();
+  return true;
+}
+
+function notifyMatchmakingQueue() {
+  matchmakingQueue.forEach((entry, index) => {
+    json(entry.ws, {
+      type: 'matchmaking',
+      status: 'waiting',
+      waitingCount: matchmakingQueue.length,
+      queuePosition: index + 1,
+      requiredPlayers: 3,
+      stake: MATCH_STAKE,
+    });
+  });
+}
+
+function makeCompletedCoinSettlement(room) {
+  const sorted = [...room.players].sort((a, b) => b.score - a.score);
+  const payoutsById = new Map();
+  const payoutSlots = [MATCH_STAKE * 2, MATCH_STAKE, 0];
+  let index = 0;
+  while (index < sorted.length) {
+    let end = index + 1;
+    while (end < sorted.length && sorted[end].score === sorted[index].score) end += 1;
+    const totalPayout = payoutSlots.slice(index, end).reduce((sum, value) => sum + value, 0);
+    const sharedPayout = totalPayout / (end - index);
+    for (let cursor = index; cursor < end; cursor += 1) {
+      payoutsById.set(sorted[cursor].id, { payout: sharedPayout, rank: index + 1 });
+    }
+    index = end;
+  }
+  return room.players.map((player) => {
+    const result = payoutsById.get(player.id);
+    return {
+      playerId: player.id,
+      playerName: player.name,
+      score: player.score,
+      rank: result.rank,
+      payout: result.payout,
+      delta: result.payout - MATCH_STAKE,
+    };
+  });
+}
+
+function sendCoinSettlement(room, results, reason = 'completed') {
+  if (!room.matchId || settledMatchIds.has(room.matchId)) return;
+  settledMatchIds.add(room.matchId);
+  const payload = {
+    type: 'coin_settlement',
+    matchId: room.matchId,
+    roomCode: room.code,
+    stake: MATCH_STAKE,
+    reason,
+    players: results,
+  };
+  broadcast(room, payload);
+}
+
+function settleCompletedMatchmakingRoom(room) {
+  if (room.mode !== 'MATCHMAKING' || room.phase !== 'FINISHED') return;
+  sendCoinSettlement(room, makeCompletedCoinSettlement(room));
+}
+
+function closeMatchmakingRoom(room, exitingPlayerId) {
+  const exitingPlayer = room.getPlayer(exitingPlayerId);
+  const interrupted = !['WAITING', 'FINISHED'].includes(room.phase);
+  if (interrupted && room.players.length === 3) {
+    const results = room.players.map((player) => ({
+      playerId: player.id,
+      playerName: player.name,
+      score: player.score,
+      rank: player.id === exitingPlayerId ? 3 : 1,
+      payout: player.id === exitingPlayerId ? 0 : MATCH_STAKE * 1.5,
+      delta: player.id === exitingPlayerId ? -MATCH_STAKE : MATCH_STAKE * 0.5,
+    }));
+    sendCoinSettlement(room, results, 'forfeit');
+  }
+
+  clearRoomTimer(room.code);
+  for (const [token, session] of roomSessions(room)) {
+    json(session.ws, {
+      type: 'match_closed',
+      reason: interrupted
+        ? `${exitingPlayer?.name || '一名玩家'}中途退出，按弃赛结算，本场匹配已结束`
+        : '本场随机匹配已结束，请返回首页重新匹配',
+    });
+    if (session.ws) session.ws.sessionToken = null;
+    sessions.delete(token);
+  }
+  rooms.delete(room.code);
+}
+
+function tryStartMatchmaking() {
+  for (let index = matchmakingQueue.length - 1; index >= 0; index -= 1) {
+    if (matchmakingQueue[index].ws.readyState !== WebSocket.OPEN) matchmakingQueue.splice(index, 1);
+  }
+  while (matchmakingQueue.length >= 3) {
+    const entries = matchmakingQueue.splice(0, 3);
+    const code = createRoomCode();
+    const room = new GameRoom(code, { mode: 'MATCHMAKING', stake: MATCH_STAKE });
+    rooms.set(code, room);
+    const players = entries.map((entry) => room.addPlayer(entry.name));
+    entries.forEach((entry, index) => {
+      createSession(entry.ws, room, players[index], entry.protocolVersion);
+    });
+    room.start();
+    broadcast(room, { type: 'match_found', roomCode: code, stake: MATCH_STAKE });
+    broadcastState(room);
+    scheduleRoomPhase(room);
+  }
+  notifyMatchmakingQueue();
 }
 
 function roomHasLegacyClient(room) {
@@ -89,6 +214,7 @@ function scheduleRoomPhase(room) {
         for (const player of room.players) result = room.confirmRound(player.id) || result;
         if (result) broadcast(room, result);
       }
+      settleCompletedMatchmakingRoom(room);
       broadcastState(room);
       scheduleRoomPhase(room);
     };
@@ -119,6 +245,7 @@ function attachSession(ws, token, session) {
     token,
     roomCode: session.roomCode,
     playerId: session.playerId,
+    mode: room?.mode || 'FRIEND',
   });
   if (room) broadcastState(room);
 }
@@ -141,6 +268,7 @@ async function handleMessage(ws, raw) {
   switch (message.type) {
     case 'create_room': {
       if (ws.sessionToken) throw new Error('当前已经在房间中');
+      removeFromMatchmakingQueue(ws);
       const code = createRoomCode();
       const room = new GameRoom(code);
       rooms.set(code, room);
@@ -150,12 +278,35 @@ async function handleMessage(ws, raw) {
     }
     case 'join_room': {
       if (ws.sessionToken) throw new Error('当前已经在房间中');
+      removeFromMatchmakingQueue(ws);
       const code = String(message.roomCode || '').trim();
       const room = rooms.get(code);
       if (!room) throw new Error('房间不存在');
+      if (room.mode !== 'FRIEND') throw new Error('随机匹配房间不能通过房间号加入');
       const player = room.addPlayer(message.name);
       createSession(ws, room, player, Number(message.protocolVersion) || 1);
       broadcastState(room);
+      break;
+    }
+    case 'join_matchmaking': {
+      if (ws.sessionToken) throw new Error('当前已经在房间中');
+      if (matchmakingQueue.some((entry) => entry.ws === ws)) {
+        notifyMatchmakingQueue();
+        break;
+      }
+      const coinBalance = Math.max(0, Number(message.coinBalance) || 0);
+      if (coinBalance < MATCH_STAKE) throw new Error(`随机匹配至少需要${MATCH_STAKE}牌豆`);
+      matchmakingQueue.push({
+        ws,
+        name: String(message.name || '').trim().slice(0, 12) || '玩家',
+        protocolVersion: Number(message.protocolVersion) || 1,
+      });
+      tryStartMatchmaking();
+      break;
+    }
+    case 'cancel_matchmaking': {
+      removeFromMatchmakingQueue(ws);
+      json(ws, { type: 'matchmaking', status: 'cancelled', waitingCount: matchmakingQueue.length });
       break;
     }
     case 'resume': {
@@ -195,6 +346,7 @@ async function handleMessage(ws, raw) {
     }
     case 'play_again': {
       const { session, room } = getSession(ws);
+      if (room.mode === 'MATCHMAKING') throw new Error('随机匹配结束后请返回首页重新匹配');
       const started = room.requestReplay(session.playerId);
       broadcastState(room);
       if (started) scheduleRoomPhase(room);
@@ -202,6 +354,10 @@ async function handleMessage(ws, raw) {
     }
     case 'exit_room': {
       const { session, room } = getSession(ws);
+      if (room.mode === 'MATCHMAKING') {
+        closeMatchmakingRoom(room, session.playerId);
+        break;
+      }
       const token = ws.sessionToken;
       const exitResult = room.removePlayer(session.playerId);
       sessions.delete(token);
@@ -232,7 +388,12 @@ const server = createServer(async (request, response) => {
   const url = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
   if (url.pathname === '/health') {
     response.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-    response.end(JSON.stringify({ ok: true, rooms: rooms.size, now: Date.now() }));
+    response.end(JSON.stringify({
+      ok: true,
+      rooms: rooms.size,
+      matchmakingWaiting: matchmakingQueue.length,
+      now: Date.now(),
+    }));
     return;
   }
   if (url.pathname === '/' || url.pathname === '/index.html') {
@@ -276,6 +437,7 @@ wss.on('connection', (ws) => {
     });
   });
   ws.on('close', () => {
+    removeFromMatchmakingQueue(ws);
     if (!ws.sessionToken) return;
     const session = sessions.get(ws.sessionToken);
     if (!session) return;

@@ -167,3 +167,11 @@ test('牌局进行中有人退出时中止本局并让其余玩家留在房间�
     assert.equal(player.score, 0);
   });
 });
+
+test('随机匹配房间快照包含模式和100牌豆入场额', () => {
+  const room = new GameRoom('654321', { mode: 'MATCHMAKING', stake: 100 });
+  const player = room.addPlayer('甲');
+  const snapshot = room.snapshotFor(player.id);
+  assert.equal(snapshot.mode, 'MATCHMAKING');
+  assert.equal(snapshot.stake, 100);
+});

@@ -11,8 +11,10 @@ export const REVEAL_DURATION_MS = Number.isFinite(parsedRevealDuration)
   : 3000;
 
 export class GameRoom {
-  constructor(code) {
+  constructor(code, options = {}) {
     this.code = code;
+    this.mode = options.mode === 'MATCHMAKING' ? 'MATCHMAKING' : 'FRIEND';
+    this.stake = this.mode === 'MATCHMAKING' ? Math.max(0, Number(options.stake) || 100) : 0;
     this.players = [];
     this.phase = 'WAITING';
     this.roundIndex = 0;
@@ -319,6 +321,8 @@ export class GameRoom {
     return {
       type: 'state',
       roomCode: this.code,
+      mode: this.mode,
+      stake: this.stake,
       phase: this.phase,
       roundIndex: this.roundIndex,
       matchNumber: this.matchNumber,
