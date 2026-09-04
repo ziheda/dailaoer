@@ -68,9 +68,15 @@ try {
   clients[2].send({ type: 'join_room', roomCode: creatorSession.roomCode, name: clients[2].name, protocolVersion: 2 });
   await Promise.all(clients.slice(1).map((client) => client.waitFor((message) => message.type === 'session')));
   clients.forEach((client) => client.send({ type: 'ready' }));
+  let firstMatchId = '';
 
   for (let roundIndex = 0; roundIndex < 4; roundIndex += 1) {
     const states = await waitForState(clients, 'SELECTING', roundIndex);
+    if (roundIndex === 0) {
+      firstMatchId = states[0].matchId;
+      assert.ok(firstMatchId);
+      assert.equal(states.every((state) => state.matchId === firstMatchId), true);
+    }
     assert.equal(states[0].publicCards.length, 4 - roundIndex);
     if (roundIndex === 3) {
       assert.equal(states.every((state) => state.publicCards[0] === null), true);
@@ -132,6 +138,7 @@ try {
   clients.forEach((client) => client.send({ type: 'play_again' }));
   const replayStates = await waitForState(clients, 'SELECTING', 0);
   assert.equal(replayStates[0].publicCards.length, 4);
+  assert.notEqual(replayStates[0].matchId, firstMatchId);
   assert.ok(replayStates[0].selectionEndsAt > Date.now());
 
   clients.forEach((client) => { client.messages = []; });

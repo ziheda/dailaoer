@@ -61,6 +61,8 @@ test('两家同为较小牌时两家分别付给较大的第三家', () => {
 test('每轮消耗公共牌、亮牌、确认后补牌并完成五轮', () => {
   const { room, players } = createStartedRoom();
   assert.equal(room.phase, 'SELECTING');
+  assert.equal(room.matchNumber, 1);
+  assert.ok(room.matchId);
   assert.equal(room.publicCards.length, 4);
   assert.equal(room.snapshotFor(players[0].id).deckCount, 35);
   assert.ok(room.selectionEndsAt > Date.now());
@@ -136,10 +138,13 @@ test('三名玩家都选择再来一回合后才重新发牌', () => {
   room.requestReplay(players[1].id);
   assert.equal(room.phase, 'FINISHED');
   assert.deepEqual([...room.replayPlayerIds], [players[0].id, players[1].id]);
+  const previousMatchId = room.matchId;
   const started = room.requestReplay(players[2].id);
   assert.equal(started, true);
   assert.equal(room.phase, 'SELECTING');
   assert.equal(room.roundIndex, 0);
+  assert.equal(room.matchNumber, 2);
+  assert.notEqual(room.matchId, previousMatchId);
   assert.equal(room.publicCards.length, 4);
   room.players.forEach((player) => {
     assert.equal(player.score, 0);

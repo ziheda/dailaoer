@@ -27,6 +27,8 @@ export class GameRoom {
     this.revealEndsAt = null;
     this.lastResult = null;
     this.roundHistory = [];
+    this.matchNumber = 0;
+    this.matchId = '';
   }
 
   addPlayer(name) {
@@ -68,6 +70,8 @@ export class GameRoom {
 
   start() {
     if (this.players.length !== 3) throw new Error('必须正好3名玩家');
+    this.matchNumber += 1;
+    this.matchId = randomUUID();
     this.deck = shuffle(createDeck());
     this.publicCards = [];
     this.selections.clear();
@@ -317,6 +321,8 @@ export class GameRoom {
       roomCode: this.code,
       phase: this.phase,
       roundIndex: this.roundIndex,
+      matchNumber: this.matchNumber,
+      matchId: this.matchId,
       baseScore: ROUND_SCORES[this.roundIndex] ?? null,
       publicCards: visiblePublicCards,
       deckCount: this.deck.length,
