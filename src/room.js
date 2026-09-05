@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { createDeck, ROUND_SCORES, settleThreeHands, shuffle } from './game.js';
+import { createDeck, evaluateHand, ROUND_SCORES, settleThreeHands, shuffle } from './game.js';
 
 const parsedSelectDuration = Number(process.env.SELECT_DURATION_MS || 30000);
 const parsedRevealDuration = Number(process.env.REVEAL_DURATION_MS || 3000);
@@ -9,6 +9,80 @@ export const SELECT_DURATION_MS = Number.isFinite(parsedSelectDuration)
 export const REVEAL_DURATION_MS = Number.isFinite(parsedRevealDuration)
   ? Math.max(100, parsedRevealDuration)
   : 3000;
+
+const BOT_PICK_WEIGHTS = Object.freeze({
+  CASUAL: [0.46, 0.32, 0.22],
+  BALANCED: [0.64, 0.25, 0.11],
+  SHARP: [0.80, 0.16, 0.04],
+});
+
+function evaluationStrength(evaluation) {
+  let value = evaluation.category * 1_000_000;
+  (evaluation.key || []).forEach((part, index) => {
+    value += Number(part || 0) * Math.pow(100, 2 - index);
+  });
+  return value;
+}
+
+function remainingHandValue(cards) {
+  if (!cards.length) return 0;
+  const ranks = cards.map((card) => card.isJoker ? 16 : Number(card.rank || 0));
+  const rankCounts = new Map();
+  for (const rank of ranks) rankCounts.set(rank, (rankCounts.get(rank) || 0) + 1);
+  const pairBonus = [...rankCounts.values()].some((count) => count >= 2) ? 90000 : 0;
+  const suitCounts = new Map();
+  for (const card of cards) suitCounts.set(card.suit, (suitCounts.get(card.suit) || 0) + 1);
+  const flushBonus = [...suitCounts.values()].some((count) => count >= 2) ? 28000 : 0;
+  return ranks.reduce((sum, rank) => sum + rank * 900, 0) + pairBonus + flushBonus;
+}
+
+function pairCombinations(cards) {
+  const combinations = [];
+  for (let left = 0; left < cards.length - 1; left += 1) {
+    for (let right = left + 1; right < cards.length; right += 1) {
+      combinations.push([cards[left], cards[right]]);
+    }
+  }
+  return combinations;
+}
+
+function expectedPairStrength(pair, publicCard, knownCards) {
+  if (publicCard) return evaluationStrength(evaluateHand([...pair, publicCard]));
+
+  // The fourth public card is hidden from bots as well. Estimate all cards that
+  // could still be unseen instead of reading the real hidden card from the room.
+  const knownIds = new Set(knownCards.filter(Boolean).map((card) => card.id));
+  const candidates = createDeck().filter((card) => !knownIds.has(card.id));
+  if (!candidates.length) return 0;
+  return candidates.reduce(
+    (sum, candidate) => sum + evaluationStrength(evaluateHand([...pair, candidate])),
+    0,
+  ) / candidates.length;
+}
+
+export function chooseBotCards(player, publicCard, visiblePublicCards = [], rng = Math.random) {
+  if (!player?.isBot || player.hand.length < 2) throw new Error('人机手牌不足');
+  const options = pairCombinations(player.hand).map((pair) => {
+    const selectedIds = new Set(pair.map((card) => card.id));
+    const remaining = player.hand.filter((card) => !selectedIds.has(card.id));
+    const strength = expectedPairStrength(
+      pair,
+      publicCard,
+      [...player.hand, ...visiblePublicCards],
+    );
+    return { pair, score: strength * 0.84 + remainingHandValue(remaining) * 0.16 };
+  }).sort((left, right) => right.score - left.score);
+
+  const weights = BOT_PICK_WEIGHTS[player.botSkill] || BOT_PICK_WEIGHTS.BALANCED;
+  const roll = Math.max(0, Math.min(0.999999, Number(rng()) || 0));
+  let tier = roll < weights[0] ? 0 : roll < weights[0] + weights[1] ? 1 : 2;
+  if (tier === 1 && options.length > 1) {
+    tier = 1 + Math.floor(Math.max(0, Math.min(0.999999, Number(rng()) || 0)) * Math.min(2, options.length - 1));
+  } else if (tier === 2 && options.length > 1) {
+    tier = 1 + Math.floor(Math.max(0, Math.min(0.999999, Number(rng()) || 0)) * (options.length - 1));
+  }
+  return options[Math.min(tier, options.length - 1)].pair;
+}
 
 export class GameRoom {
   constructor(code, options = {}) {
@@ -33,7 +107,7 @@ export class GameRoom {
     this.matchId = '';
   }
 
-  addPlayer(name) {
+  addPlayer(name, options = {}) {
     if (this.phase !== 'WAITING') throw new Error('牌局已经开始');
     if (this.players.length >= 3) throw new Error('房间已经满员');
     const safeName = String(name || '').trim().slice(0, 12) || `玩家${this.players.length + 1}`;
@@ -44,6 +118,12 @@ export class GameRoom {
       connected: true,
       hand: [],
       score: 0,
+      isBot: options.isBot === true,
+      botSkill: options.isBot === true
+        ? ['CASUAL', 'BALANCED', 'SHARP'].includes(options.botSkill)
+          ? options.botSkill
+          : 'BALANCED'
+        : null,
     };
     this.players.push(player);
     return player;
@@ -130,6 +210,17 @@ export class GameRoom {
     this.selections.set(playerId, selected);
     if (this.selections.size === this.players.length) return this.resolveSelectedRound();
     return null;
+  }
+
+  selectBotCards(playerId, rng = Math.random) {
+    const player = this.getPlayer(playerId);
+    if (!player?.isBot) throw new Error('该玩家不是人机');
+    const visiblePublicCards = this.publicCards.map((card) =>
+      card.id === this.hiddenPublicCardId && this.roundIndex <= 3 ? null : card,
+    );
+    const currentPublicCard = this.roundIndex <= 3 ? visiblePublicCards[0] ?? null : null;
+    const selected = chooseBotCards(player, currentPublicCard, visiblePublicCards, rng);
+    return this.selectCards(player.id, selected.map((card) => card.id));
   }
 
   autoSelectMissing() {
@@ -302,6 +393,7 @@ export class GameRoom {
       players: this.players.map((player, index) => ({
         id: player.id,
         name: player.name,
+        isBot: player.isBot,
         cards: hands[index],
         evaluation: settlement.evaluations[index],
         delta: settlement.deltas[index],
@@ -346,6 +438,7 @@ export class GameRoom {
           ? this.lastResult.players.map((player) => ({
               id: player.id,
               name: player.name,
+              isBot: player.isBot,
               cards: player.cards,
               evaluationName: player.evaluation.name,
               delta: player.delta,
@@ -363,6 +456,7 @@ export class GameRoom {
         players: result.players.map((player) => ({
           id: player.id,
           name: player.name,
+          isBot: player.isBot,
           cards: player.cards,
           evaluationName: player.evaluation.name,
           delta: player.delta,
@@ -372,6 +466,7 @@ export class GameRoom {
       players: this.players.map((player) => ({
         id: player.id,
         name: player.name,
+        isBot: player.isBot,
         ready: player.ready,
         connected: player.connected,
         handCount: player.hand.length,

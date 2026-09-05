@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { settleThreeHands } from '../src/game.js';
-import { GameRoom } from '../src/room.js';
+import { chooseBotCards, GameRoom } from '../src/room.js';
 
 const card = (rank, suit = 'club') => ({ id: `${suit}-${rank}`, rank, suit });
 
@@ -174,4 +174,38 @@ test('随机匹配房间快照包含模式和100牌豆入场额', () => {
   const snapshot = room.snapshotFor(player.id);
   assert.equal(snapshot.mode, 'MATCHMAKING');
   assert.equal(snapshot.stake, 100);
+});
+
+test('进阶人机优先选择当前可组成强牌的两张手牌', () => {
+  const player = {
+    isBot: true,
+    botSkill: 'SHARP',
+    hand: [
+      card(14, 'club'),
+      card(14, 'heart'),
+      card(9, 'spade'),
+      card(6, 'diamond'),
+      card(2, 'club'),
+    ],
+  };
+  const selected = chooseBotCards(player, card(14, 'spade'), [], () => 0);
+  assert.deepEqual(new Set(selected.map((item) => item.id)), new Set(['club-14', 'heart-14']));
+});
+
+test('人机玩家会自主选牌且快照明确标记人机身份', () => {
+  const room = new GameRoom('778899', { mode: 'MATCHMAKING', stake: 100 });
+  const human = room.addPlayer('真人');
+  const botA = room.addPlayer('人机·小满', { isBot: true, botSkill: 'BALANCED' });
+  const botB = room.addPlayer('人机·阿岚', { isBot: true, botSkill: 'SHARP' });
+  room.start();
+
+  room.selectBotCards(botA.id, () => 0);
+  room.selectBotCards(botB.id, () => 0);
+  const snapshot = room.snapshotFor(human.id);
+  assert.equal(snapshot.players.filter((player) => player.isBot).length, 2);
+  assert.deepEqual(new Set(snapshot.selectedPlayerIds), new Set([botA.id, botB.id]));
+
+  const result = room.selectCards(human.id, human.hand.slice(0, 2).map((item) => item.id));
+  assert.equal(result.players.filter((player) => player.isBot).length, 2);
+  assert.equal(result.players.length, 3);
 });

@@ -12,9 +12,23 @@ const INDEX_HTML = join(ROOT, 'public', 'index.html');
 const rooms = new Map();
 const sessions = new Map();
 const roomTimers = new Map();
+const roomBotTimers = new Map();
 const matchmakingQueue = [];
 const settledMatchIds = new Set();
 const MATCH_STAKE = 100;
+const parsedBotWait = Number(process.env.MATCHMAKING_BOT_WAIT_MS || 15000);
+const MATCHMAKING_BOT_WAIT_MS = Number.isFinite(parsedBotWait)
+  ? Math.max(500, parsedBotWait)
+  : 15000;
+const BOT_PROFILES = Object.freeze([
+  { name: '人机·小满', skill: 'BALANCED' },
+  { name: '人机·阿岚', skill: 'SHARP' },
+  { name: '人机·青禾', skill: 'BALANCED' },
+  { name: '人机·元宝', skill: 'CASUAL' },
+  { name: '人机·星河', skill: 'SHARP' },
+  { name: '人机·南风', skill: 'BALANCED' },
+]);
+let matchmakingBotTimer = null;
 
 function json(ws, payload) {
   if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload));
@@ -61,6 +75,7 @@ function removeFromMatchmakingQueue(ws) {
   if (index < 0) return false;
   matchmakingQueue.splice(index, 1);
   notifyMatchmakingQueue();
+  scheduleMatchmakingBotFill();
   return true;
 }
 
@@ -73,6 +88,8 @@ function notifyMatchmakingQueue() {
       queuePosition: index + 1,
       requiredPlayers: 3,
       stake: MATCH_STAKE,
+      botFillAt: entry.joinedAt + MATCHMAKING_BOT_WAIT_MS,
+      botWaitMs: MATCHMAKING_BOT_WAIT_MS,
     });
   });
 }
@@ -140,6 +157,7 @@ function closeMatchmakingRoom(room, exitingPlayerId) {
   }
 
   clearRoomTimer(room.code);
+  clearRoomBotTimers(room.code);
   for (const [token, session] of roomSessions(room)) {
     json(session.ws, {
       type: 'match_closed',
@@ -153,29 +171,66 @@ function closeMatchmakingRoom(room, exitingPlayerId) {
   rooms.delete(room.code);
 }
 
+function startMatchmakingRoom(entries, botCount = 0) {
+  const code = createRoomCode();
+  const room = new GameRoom(code, { mode: 'MATCHMAKING', stake: MATCH_STAKE });
+  rooms.set(code, room);
+  const players = entries.map((entry) => room.addPlayer(entry.name));
+  entries.forEach((entry, index) => {
+    createSession(entry.ws, room, players[index], entry.protocolVersion);
+  });
+
+  const startProfile = randomInt(BOT_PROFILES.length);
+  for (let index = 0; index < botCount; index += 1) {
+    const profile = BOT_PROFILES[(startProfile + index) % BOT_PROFILES.length];
+    room.addPlayer(profile.name, { isBot: true, botSkill: profile.skill });
+  }
+
+  room.start();
+  broadcast(room, {
+    type: 'match_found',
+    roomCode: code,
+    stake: MATCH_STAKE,
+    botCount,
+  });
+  broadcastState(room);
+  scheduleRoomPhase(room);
+}
+
+function scheduleMatchmakingBotFill() {
+  if (matchmakingBotTimer) clearTimeout(matchmakingBotTimer);
+  matchmakingBotTimer = null;
+  const first = matchmakingQueue[0];
+  if (!first) return;
+  const delay = Math.max(0, first.joinedAt + MATCHMAKING_BOT_WAIT_MS - Date.now());
+  matchmakingBotTimer = setTimeout(() => {
+    matchmakingBotTimer = null;
+    tryStartMatchmaking();
+  }, delay);
+}
+
 function tryStartMatchmaking() {
   for (let index = matchmakingQueue.length - 1; index >= 0; index -= 1) {
     if (matchmakingQueue[index].ws.readyState !== WebSocket.OPEN) matchmakingQueue.splice(index, 1);
   }
   while (matchmakingQueue.length >= 3) {
     const entries = matchmakingQueue.splice(0, 3);
-    const code = createRoomCode();
-    const room = new GameRoom(code, { mode: 'MATCHMAKING', stake: MATCH_STAKE });
-    rooms.set(code, room);
-    const players = entries.map((entry) => room.addPlayer(entry.name));
-    entries.forEach((entry, index) => {
-      createSession(entry.ws, room, players[index], entry.protocolVersion);
-    });
-    room.start();
-    broadcast(room, { type: 'match_found', roomCode: code, stake: MATCH_STAKE });
-    broadcastState(room);
-    scheduleRoomPhase(room);
+    startMatchmakingRoom(entries, 0);
+  }
+  if (
+    matchmakingQueue.length > 0 &&
+    Date.now() >= matchmakingQueue[0].joinedAt + MATCHMAKING_BOT_WAIT_MS
+  ) {
+    const entries = matchmakingQueue.splice(0, Math.min(3, matchmakingQueue.length));
+    startMatchmakingRoom(entries, 3 - entries.length);
   }
   notifyMatchmakingQueue();
+  scheduleMatchmakingBotFill();
 }
 
 function roomHasLegacyClient(room) {
   return room.players.some((player) => {
+    if (player.isBot) return false;
     const session = [...sessions.values()].find(
       (item) => item.roomCode === room.code && item.playerId === player.id,
     );
@@ -189,8 +244,57 @@ function clearRoomTimer(roomCode) {
   roomTimers.delete(roomCode);
 }
 
+function clearRoomBotTimers(roomCode) {
+  const timers = roomBotTimers.get(roomCode) || [];
+  timers.forEach((timer) => clearTimeout(timer));
+  roomBotTimers.delete(roomCode);
+}
+
+function scheduleBotActions(room) {
+  const bots = room.players.filter((player) => player.isBot);
+  if (!bots.length) return;
+  const timers = [];
+
+  if (room.phase === 'SELECTING') {
+    bots.filter((bot) => !room.selections.has(bot.id)).forEach((bot, index) => {
+      const timer = setTimeout(() => {
+        if (room.phase !== 'SELECTING' || room.selections.has(bot.id)) return;
+        try {
+          const result = room.selectBotCards(bot.id);
+          if (result) broadcast(room, result);
+          broadcastState(room);
+          if (result) scheduleRoomPhase(room);
+        } catch (error) {
+          broadcast(room, { type: 'error', message: error.message || '人机选牌错误' });
+        }
+      }, 650 + index * 520 + randomInt(0, 420));
+      timers.push(timer);
+    });
+  } else if (room.phase === 'ROUND_CONFIRM') {
+    bots.filter((bot) => !room.confirmedPlayerIds.has(bot.id)).forEach((bot, index) => {
+      const timer = setTimeout(() => {
+        if (room.phase !== 'ROUND_CONFIRM' || room.confirmedPlayerIds.has(bot.id)) return;
+        try {
+          const previousPhase = room.phase;
+          const result = room.confirmRound(bot.id);
+          if (result) broadcast(room, result);
+          broadcastState(room);
+          if (result || room.phase !== previousPhase) scheduleRoomPhase(room);
+        } catch (error) {
+          broadcast(room, { type: 'error', message: error.message || '人机确认错误' });
+        }
+      }, 520 + index * 360 + randomInt(0, 280));
+      timers.push(timer);
+    });
+  }
+
+  if (timers.length) roomBotTimers.set(room.code, timers);
+}
+
 function scheduleRoomPhase(room) {
   clearRoomTimer(room.code);
+  clearRoomBotTimers(room.code);
+  scheduleBotActions(room);
   let deadline = null;
   let action = null;
 
@@ -300,6 +404,7 @@ async function handleMessage(ws, raw) {
         ws,
         name: String(message.name || '').trim().slice(0, 12) || '玩家',
         protocolVersion: Number(message.protocolVersion) || 1,
+        joinedAt: Date.now(),
       });
       tryStartMatchmaking();
       break;
@@ -363,6 +468,7 @@ async function handleMessage(ws, raw) {
       sessions.delete(token);
       ws.sessionToken = null;
       clearRoomTimer(room.code);
+      clearRoomBotTimers(room.code);
       json(ws, { type: 'room_exited' });
       if (room.players.length === 0) rooms.delete(room.code);
       else {
@@ -392,6 +498,7 @@ const server = createServer(async (request, response) => {
       ok: true,
       rooms: rooms.size,
       matchmakingWaiting: matchmakingQueue.length,
+      matchmakingBotWaitMs: MATCHMAKING_BOT_WAIT_MS,
       now: Date.now(),
     }));
     return;
@@ -462,7 +569,11 @@ const heartbeatTimer = setInterval(() => {
   }
 }, 10000);
 
-wss.on('close', () => clearInterval(heartbeatTimer));
+wss.on('close', () => {
+  clearInterval(heartbeatTimer);
+  if (matchmakingBotTimer) clearTimeout(matchmakingBotTimer);
+  for (const roomCode of roomBotTimers.keys()) clearRoomBotTimers(roomCode);
+});
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`Game server listening on http://0.0.0.0:${PORT}`);
